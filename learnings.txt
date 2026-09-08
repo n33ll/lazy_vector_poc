@@ -1,0 +1,92 @@
+What happens when we do dynamic memory allocation:
+    either, brk() syscall 
+    or, mmap() syscall.
+
+brk() is a simple operation that grows the heap with high fragmentation, therefore used for small data ( < 128KB).
+mmap() is used to wirte the data into RAM.
+
+How mmap(addr, size, protection_bits, mapping_flags, fd, offset) works?
+
+Each argument
+#	Param	  What it means and Typical value for malloc
+1    addr      address — where you'd like the mapping. NULL = "kernel picks" [NULL]
+2    length    How many bytes to map (rounded up to page size) [~400000 for your v21]
+3    prot      Protection bits: PROT_READ, PROT_WRITE, PROT_EXEC, PROT_NONE (OR'd) [PROT_READ | PROT_WRITE]
+4    flags     Mapping type — most important bits: [MAP_PRIVATE | MAP_ANONYMOUS]
+5    fd        File descriptor (for file-backed mappings). Ignored when MAP_ANONYMOUS [-1]
+6    offset    Offset into the file. Ignored when MAP_ANONYMOUS [0]
+
+some important flags:
+
+Flag	                   Meaning
+MAP_PRIVATE    Copy-on-write; changes are private to this process
+MAP_SHARED     Changes are visible to other processes / written to file
+MAP_ANONYMOUS  Not backed by any file — just zero-filled memory (heap use)
+MAP_FIXED      Place exactly at addr (dangerous; overwrites existing mappings)
+
+A crucial part of mmp is that it doesnt immediately allocate physical RAM. it has 2-phases:
+
+Phase 1: 
+    - creates VMA (virtual memory Area).
+    - inserts VMA into process's VMA tree. which you can see in /proc/<pid>/maps
+    - No physiscal pages are allocated.
+    - Returns the virtual address to the userspace
+
+Phase 2: 
+Vector constructor writes v21[0] = 0  (address 0x7f...000)
+   - MMU walks page table → no PTE → #PF (page fault)
+   - Kernel: VMA lookup → valid, anonymous, writable → minor fault
+   - Kernel: allocate physical frame from free list
+   - Kernel: zero the 4KB frame (security + POSIX requirement for MAP_ANON)
+   - Kernel: write PTE in page table: virtual 0x7f...000 → physical frame, RW
+   - Return to userspace
+
+CPU retries write to 0x7f...000
+   - MMU walks page table → finds PTE → translates → success
+   - TLB caches: {0x7f...000 → physical frame}
+   - Write completes
+
+v21[1] through v21[1023] → same page, TLB hit, no fault
+
+There can be major page fault and minor page faults:
+    - major faults:
+        1. Swapped out page which is located in disk 
+        2. File backed mmap, remember that file I/O is also dynamic mem-allocation.
+                When the file contents arent in RAM yet we need to do DISK I/O to 
+                get the information we require.
+
+MORE on ZERO-filling : 
+    When flag MAP_ANONYMOUS is used in mmap, kernel is forced to do zero-filling. this
+    is due to protection of data from the process that it doesnt belong to.
+
+    Regardless of vector(n) or vector(n, 0) , there is a double zero allocation that
+    is happening. which is sort of not the best of efficiencies sake. In real-world senario
+    when a vector of  trivially copyable datatype is initialized, rather than doing a 
+    for loop on the entries and initializing them, vector library does memset which
+    utilizes SIMD or even more efficient hardware optimized routines like "rep stosq".
+    This hardware routine is more efficient than SIMD because it bypasses cache 
+    and directly writes into memory. This stops the initialization from polluting cache
+    by evicting usefull data, and read-before-write penalty (i.e. fetch from mem if not
+    found in cache and then overwrite the cache).
+
+
+Project on this zero-filling cache flooding problem:
+
+Rather than relying on std vector, which does double initialization (1 fetch from
+RAM and another from cache) and cache flooding (evicting important data). Lets use 
+a custom vector library, that uses memfd() to create an anonymous fd containing
+the pattern of initialization in /tmpfs and rather than doing vector entry-wise initialization
+we do page tile initialization. This will fix the cache flooding issue and imporve on latency 
+from future instruction executions.
+
+
+memfd_create
+ftruncate
+mmap
+munmap
+fill_n
+pointer arithematic
+
+
+
+
